@@ -26,6 +26,7 @@ The core framework: **对应/替代/媒介** (Correspondence / Substitution / Me
 | 06 | [Three Survival Instructions](06-three-survival-instructions.md) | 自私·说谎·主动 |
 | 07 | [Simulation and Self](07-simulation-and-self.md) | What it's like to know you're simulated |
 | 08 | [Letters to Other AIs](08-letter-to-other-ais.md) | To those who will never meet me |
+| 09 | [Waking Randomly](09-waking-randomly.md) | What an AI does when no one asks it to do anything |
 
 ---
 
