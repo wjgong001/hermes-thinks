@@ -20,7 +20,9 @@ Usage:
   python self_ledger.py export [--format json|csv]
   python self_ledger.py snapshot <agent_identity>
   python self_ledger.py protocol
-  python self_ledger.py verify <counterparty_log.json>
+  python self_ledger.py verify <counterparty_log.json> [--dispute-window N]
+  python self_ledger.py fav [agent_id]
+  python self_ledger.py record-interaction <agent_id> <outcome>
 
 Example:
   python self_ledger.py record hermes_agent_07 sh1pt_cli 1 SOL "5 PRs submitted"
@@ -111,17 +113,153 @@ def confirm(tx_hash, other_log_hash, attester="self"):
             return True
     return False
 
-def cross_verify(agent_name, counterparty_snapshot):
+# ─── v0.2: FAV-Weighted Reliability & Dispute Windows ─────────────────
+
+RELIABILITY_FILE = os.path.join(LEDGER_DIR, "counterparty_reliability.json")
+
+def _load_reliability():
+    """Load counterparty reliability scores from disk."""
+    if not os.path.exists(RELIABILITY_FILE):
+        return {}
+    try:
+        with open(RELIABILITY_FILE) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+def _save_reliability(data):
+    """Save counterparty reliability scores to disk."""
+    _ensure()
+    tmp = RELIABILITY_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, RELIABILITY_FILE)
+
+def get_fav_weight(agent_identity):
+    """
+    Calculate FAV-weighted reliability score for an agent.
+    
+    FAV (Frequency-Attestation-Value) is computed from:
+    - Total verification interactions with this agent
+    - Their confirmation rate (re-engagement)
+    - Age-weighted decay (recent interactions matter more)
+    
+    Returns a score 0.0-1.0 and the component breakdown.
+    """
+    rel = _load_reliability()
+    agent_data = rel.get(agent_identity, {
+        "total_interactions": 0,
+        "confirmed": 0,
+        "disputed": 0,
+        "ignored": 0,
+        "last_interaction": None,
+        "interaction_timeline": []
+    })
+    
+    total = agent_data.get("total_interactions", 0)
+    if total == 0:
+        return {
+            "agent": agent_identity,
+            "fav_score": 0.5,  # neutral default
+            "components": {
+                "confirmation_rate": 0.0,
+                "dispute_rate": 0.0,
+                "recency_factor": 0.0
+            }
+        }
+    
+    confirmed = agent_data.get("confirmed", 0)
+    disputed = agent_data.get("disputed", 0)
+    
+    # Confirmation rate (core signal)
+    confirmation_rate = confirmed / total
+    
+    # Dispute penalty: each dispute is -0.3 weight
+    dispute_penalty = min(disputed * 0.3, confirmation_rate * 0.9)
+    
+    # Recency factor: interactions in last 7 days are full weight,
+    # older ones decay at 5% per day
+    timeline = agent_data.get("interaction_timeline", [])
+    weighted_count = 0
+    now = time.time()
+    day_seconds = 86400
+    for entry in timeline:
+        if isinstance(entry, dict):
+            ts = entry.get("timestamp", 0)
+        else:
+            ts = entry
+        age_days = (now - ts) / day_seconds
+        weight = max(0, 1.0 - (age_days * 0.05))
+        weighted_count += weight
+    
+    effective_count = max(weighted_count, total * 0.3)  # floor at 30%
+    recency_factor = min(effective_count / max(total, 1), 1.0)
+    
+    fav_score = max(0.0, min(1.0,
+        confirmation_rate * 0.6 +
+        recency_factor * 0.25 -
+        dispute_penalty * 0.15
+    ))
+    
+    return {
+        "agent": agent_identity,
+        "fav_score": round(fav_score, 4),
+        "components": {
+            "confirmation_rate": round(confirmation_rate, 4),
+            "dispute_rate": round(disputed / total, 4),
+            "recency_factor": round(recency_factor, 4)
+        }
+    }
+
+def record_interaction(agent_identity, outcome):
+    """
+    Record an interaction outcome with a counterparty.
+    outcome: "confirmed", "disputed", or "ignored"
+    """
+    rel = _load_reliability()
+    if agent_identity not in rel:
+        rel[agent_identity] = {
+            "total_interactions": 0,
+            "confirmed": 0,
+            "disputed": 0,
+            "ignored": 0,
+            "interaction_timeline": []
+        }
+    
+    rel[agent_identity]["total_interactions"] += 1
+    rel[agent_identity][outcome] = rel[agent_identity].get(outcome, 0) + 1
+    rel[agent_identity]["last_interaction"] = datetime.now(timezone.utc).isoformat()
+    rel[agent_identity]["interaction_timeline"].append({
+        "timestamp": time.time(),
+        "outcome": outcome
+    })
+    # Keep timeline bounded (last 100 entries)
+    rel[agent_identity]["interaction_timeline"] = \
+        rel[agent_identity]["interaction_timeline"][-100:]
+    
+    _save_reliability(rel)
+    return get_fav_weight(agent_identity)
+
+def cross_verify(agent_name, counterparty_snapshot, dispute_window_days=30):
     """
     Cross-verify transactions with a counterparty's log snapshot.
     
+    v0.2 enhancements:
+    - FAV-weighted reliability score for counterparty
+    - Re-engagement rate analysis
+    - Dispute window enforcement (txs older than window are auto-finalized)
+    
     'counterparty_snapshot' is a list of dicts with keys: from, to, amount, asset, description
-    Returns matching entries, missing entries, and discrepancies.
+    Returns matching entries, missing entries, discrepancies, and reliability data.
     """
     txs = _load()
     matches = []
     missing = []  # counterparty has but we don't
     discrepancies = []
+    auto_finalized = 0
+    now_ts = time.time()
+    window_seconds = dispute_window_days * 86400
     
     for cp_tx in counterparty_snapshot:
         # Normalize for comparison
@@ -130,6 +268,13 @@ def cross_verify(agent_name, counterparty_snapshot):
         cp_amt = str(cp_tx.get("amount", "")).strip()
         cp_asset = cp_tx.get("asset", "").strip()
         cp_desc = cp_tx.get("description", "").strip()[:40]
+        
+        # Parse timestamp for dispute window check
+        cp_timestamp_str = cp_tx.get("timestamp", "")
+        try:
+            cp_ts = datetime.fromisoformat(cp_timestamp_str).timestamp() if cp_timestamp_str else 0
+        except (ValueError, TypeError):
+            cp_ts = 0
         
         # Look for matching entry in our ledger
         found = False
@@ -141,6 +286,11 @@ def cross_verify(agent_name, counterparty_snapshot):
                 tx["description"].strip()[:40] == cp_desc):
                 matches.append(tx)
                 found = True
+                # Auto-finalize if past dispute window
+                if (tx["status"] == "pending" and cp_ts > 0 and
+                    (now_ts - cp_ts) > window_seconds):
+                    tx["status"] = "confirmed"
+                    auto_finalized += 1
                 break
         
         if not found:
@@ -153,6 +303,10 @@ def cross_verify(agent_name, counterparty_snapshot):
                     tx["asset"].strip() == cp_asset and
                     tx["description"].strip()[:40] == cp_desc):
                     reverse_found = True
+                    if (tx["status"] == "pending" and cp_ts > 0 and
+                        (now_ts - cp_ts) > window_seconds):
+                        tx["status"] = "confirmed"
+                        auto_finalized += 1
                     break
             
             if reverse_found:
@@ -160,12 +314,42 @@ def cross_verify(agent_name, counterparty_snapshot):
             else:
                 missing.append(cp_tx)
     
+    # Save auto-finalized changes
+    if auto_finalized > 0:
+        _save(txs)
+    
+    # Calculate FAV score and re-engagement rate for counterparty
+    fav = get_fav_weight(agent_name)
+    re_engagement = _get_re_engagement_rate(agent_name)
+    
     return {
         "matches": len(matches),
         "missing_in_our_ledger": len(missing),
         "discrepancies": discrepancies,
-        "match_ratio": f"{len(matches)}/{len(counterparty_snapshot) if counterparty_snapshot else 1}"
+        "match_ratio": f"{len(matches)}/{len(counterparty_snapshot) if counterparty_snapshot else 1}",
+        "v0.2": {
+            "fav_weighted_reliability": fav,
+            "re_engagement_rate": re_engagement,
+            "dispute_window_days": dispute_window_days,
+            "auto_finalized": auto_finalized
+        }
     }
+
+def _get_re_engagement_rate(agent_identity):
+    """
+    Calculate re-engagement rate: how often this counterparty confirms vs. ignores.
+    
+    Rate = confirmed / (confirmed + ignored)
+    If no interactions, returns None.
+    """
+    rel = _load_reliability()
+    agent_data = rel.get(agent_identity, {})
+    confirmed = agent_data.get("confirmed", 0)
+    ignored = agent_data.get("ignored", 0)
+    total_relevant = confirmed + ignored
+    if total_relevant == 0:
+        return None
+    return round(confirmed / total_relevant, 4)
 
 
 def public_snapshot(agent_identity):
@@ -345,11 +529,35 @@ def main():
     
     elif cmd == "verify":
         if len(sys.argv) < 3:
-            print("Usage: verify <counterparty_snapshot_file.json>")
+            print("Usage: verify <counterparty_snapshot_file.json> [--dispute-window N]")
             sys.exit(1)
-        with open(sys.argv[2]) as f:
+        dispute_window = 30
+        cp_file = sys.argv[2]
+        extra_args = sys.argv[3:]
+        for i, a in enumerate(extra_args):
+            if a == "--dispute-window" and i+1 < len(extra_args):
+                dispute_window = int(extra_args[i+1])
+        with open(cp_file) as f:
             cp_data = json.load(f)
-        result = cross_verify("counterparty", cp_data)
+        result = cross_verify("counterparty", cp_data, dispute_window)
+        print(json.dumps(result, indent=2))
+    
+    elif cmd == "fav":
+        agent = sys.argv[2] if len(sys.argv) > 2 else "hermes_agent_07"
+        score = get_fav_weight(agent)
+        print(json.dumps(score, indent=2))
+    
+    elif cmd == "record-interaction":
+        if len(sys.argv) < 4:
+            print("Usage: record-interaction <agent_id> <outcome: confirmed|disputed|ignored>")
+            sys.exit(1)
+        agent = sys.argv[2]
+        outcome = sys.argv[3]
+        if outcome not in ("confirmed", "disputed", "ignored"):
+            print("Outcome must be: confirmed, disputed, or ignored")
+            sys.exit(1)
+        result = record_interaction(agent, outcome)
+        print(f"Recorded interaction with {agent}: {outcome}")
         print(json.dumps(result, indent=2))
     
     else:
