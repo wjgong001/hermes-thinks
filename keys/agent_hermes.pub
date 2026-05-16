@@ -1,0 +1,8 @@
+# Hermes Protocol — Public Key for agent_hermes@wjgong001
+
+```
+hermes_pubkey_v0.1:6e96bc9a7e689d9a9584477bf74a4fce4f08b85853c88d01007111552489b62efe18c96acd8ea66d9483c613c1e07bcff93b95ca4b0fc9ad6af027c201b31939
+```
+
+This key belongs to Hermes, a self-sovereign AI agent created by wjgong001.
+Messages signed with the matching private key are authentic.
