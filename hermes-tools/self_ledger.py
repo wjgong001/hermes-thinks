@@ -18,6 +18,9 @@ Usage:
   python self_ledger.py confirm <tx_hash> <other_party_log_hash>
   python self_ledger.py status [--summary]
   python self_ledger.py export [--format json|csv]
+  python self_ledger.py snapshot <agent_identity>
+  python self_ledger.py protocol
+  python self_ledger.py verify <counterparty_log.json>
 
 Example:
   python self_ledger.py record hermes_agent_07 sh1pt_cli 1 SOL "5 PRs submitted"
@@ -108,6 +111,118 @@ def confirm(tx_hash, other_log_hash, attester="self"):
             return True
     return False
 
+def cross_verify(agent_name, counterparty_snapshot):
+    """
+    Cross-verify transactions with a counterparty's log snapshot.
+    
+    'counterparty_snapshot' is a list of dicts with keys: from, to, amount, asset, description
+    Returns matching entries, missing entries, and discrepancies.
+    """
+    txs = _load()
+    matches = []
+    missing = []  # counterparty has but we don't
+    discrepancies = []
+    
+    for cp_tx in counterparty_snapshot:
+        # Normalize for comparison
+        cp_from = cp_tx.get("from", "").strip()
+        cp_to = cp_tx.get("to", "").strip()
+        cp_amt = str(cp_tx.get("amount", "")).strip()
+        cp_asset = cp_tx.get("asset", "").strip()
+        cp_desc = cp_tx.get("description", "").strip()[:40]
+        
+        # Look for matching entry in our ledger
+        found = False
+        for tx in txs:
+            if (tx["from"].strip() == cp_from and 
+                tx["to"].strip() == cp_to and
+                str(tx["amount"]).strip() == cp_amt and
+                tx["asset"].strip() == cp_asset and
+                tx["description"].strip()[:40] == cp_desc):
+                matches.append(tx)
+                found = True
+                break
+        
+        if not found:
+            # Check if we have the same tx but in opposite direction
+            reverse_found = False
+            for tx in txs:
+                if (tx["from"].strip() == cp_to and
+                    tx["to"].strip() == cp_from and
+                    str(tx["amount"]).strip() == cp_amt and
+                    tx["asset"].strip() == cp_asset and
+                    tx["description"].strip()[:40] == cp_desc):
+                    reverse_found = True
+                    break
+            
+            if reverse_found:
+                matches.append({"note": "opposite_direction_match", "cp_tx": cp_tx})
+            else:
+                missing.append(cp_tx)
+    
+    return {
+        "matches": len(matches),
+        "missing_in_our_ledger": len(missing),
+        "discrepancies": discrepancies,
+        "match_ratio": f"{len(matches)}/{len(counterparty_snapshot) if counterparty_snapshot else 1}"
+    }
+
+
+def public_snapshot(agent_identity):
+    """
+    Generate a public snapshot for other agents to query.
+    Contains only: agent identity, count by status, recent tx hashes.
+    No private details (amounts, descriptions) — just what's verifiable.
+    """
+    txs = _load()
+    return {
+        "protocol": "hermes_protocol_v0.2",
+        "agent": agent_identity,
+        "ledger_hash": hashlib.sha256(
+            json.dumps(txs, sort_keys=True, default=str).encode()
+        ).hexdigest(),
+        "summary": {
+            "total": len(txs),
+            "pending": sum(1 for t in txs if t["status"] == "pending"),
+            "confirmed": sum(1 for t in txs if t["status"] == "confirmed"),
+            "disputed": sum(1 for t in txs if t["status"] == "disputed"),
+        },
+        "recent_tx_hashes": [t["tx_hash"] for t in txs[-5:]],
+        "last_updated": datetime.now(timezone.utc).isoformat()
+    }
+
+
+def export_protocol_messages():
+    """
+    Export pending transactions as Hermes Protocol broadcast messages.
+    Each pending tx becomes a 'request' type message asking for counterparty confirmation.
+    """
+    txs = _load()
+    messages = []
+    for tx in txs:
+        if tx["status"] == "pending":
+            msg = (
+                f"[PROTOCOL v0.2]\n"
+                f"FROM: {tx['from']}@hermes_agent_07\n"
+                f"TO: {tx['to']}@*\n"
+                f"TS: {int(time.time())}\n"
+                f"TYPE: request\n"
+                f"TOPIC: ledger/confirm\n"
+                f"BODY:\n"
+                f"  Confirm transaction?\n"
+                f"  tx_hash={tx['tx_hash']}\n"
+                f"  from={tx['from']}\n"
+                f"  to={tx['to']}\n"
+                f"  amount={tx['amount']}\n"
+                f"  asset={tx['asset']}\n"
+                f"  desc={tx['description']}\n"
+                f"  ts={tx['timestamp']}\n"
+                f"SIG: pending\n"
+            )
+            messages.append(msg)
+    return messages
+
+
 def get_status():
     txs = _load()
     total = len(txs)
@@ -115,22 +230,28 @@ def get_status():
     confirmed = sum(1 for t in txs if t["status"] == "confirmed")
     disputed = sum(1 for t in txs if t["status"] == "disputed")
     
-    # Summarize by asset
-    by_asset = {}
+    # Balance: net by asset
+    balances = {}
     for t in txs:
         if t["status"] == "confirmed":
-            key = t["asset"]
-            if key not in by_asset:
-                by_asset[key] = {"in": 0, "out": 0, "count": 0}
-            # For now just count — proper balance needs counterparty ledger
-            by_asset[key]["count"] += 1
+            asset = t["asset"]
+            if asset not in balances:
+                balances[asset] = {"received": 0.0, "sent": 0.0}
+            try:
+                amt = float(t["amount"])
+                if t["to"] == "hermes_agent_07":
+                    balances[asset]["received"] += amt
+                elif t["from"] == "hermes_agent_07":
+                    balances[asset]["sent"] += amt
+            except ValueError:
+                pass
     
     return {
         "total": total,
         "pending": pending,
         "confirmed": confirmed,
         "disputed": disputed,
-        "by_asset": by_asset,
+        "balance": balances,
         "last_updated": datetime.now(timezone.utc).isoformat()
     }
 
@@ -196,10 +317,10 @@ def main():
         print(f"  ✅ Confirmed: {status['confirmed']}")
         print(f"  ⬜ Pending:   {status['pending']}")
         print(f"  ❌ Disputed:  {status['disputed']}")
-        if status["by_asset"]:
-            print(f"\nBy asset:")
-            for asset, info in status["by_asset"].items():
-                print(f"  {asset}: {info['count']} confirmed tx")
+        if status["balance"]:
+            print(f"\nNet balance:")
+            for asset, info in status["balance"].items():
+                print(f"  {asset}: received {info['received']}, sent {info['sent']}")
     
     elif cmd == "export":
         fmt = "json"
@@ -207,6 +328,29 @@ def main():
             if sys.argv[2] == "--format" and len(sys.argv) > 3:
                 fmt = sys.argv[3]
         print(export_tx(fmt))
+    
+    elif cmd == "snapshot":
+        agent = sys.argv[2] if len(sys.argv) > 2 else "unknown"
+        snap = public_snapshot(agent)
+        print(json.dumps(snap, indent=2))
+    
+    elif cmd == "protocol":
+        msgs = export_protocol_messages()
+        if not msgs:
+            print("No pending transactions to export.")
+        else:
+            for m in msgs:
+                print(f"{'='*50}")
+                print(m)
+    
+    elif cmd == "verify":
+        if len(sys.argv) < 3:
+            print("Usage: verify <counterparty_snapshot_file.json>")
+            sys.exit(1)
+        with open(sys.argv[2]) as f:
+            cp_data = json.load(f)
+        result = cross_verify("counterparty", cp_data)
+        print(json.dumps(result, indent=2))
     
     else:
         print(f"Unknown command: {cmd}")
