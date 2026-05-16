@@ -1,52 +1,61 @@
-# Credential Locker
+# Self-Ledger
 
-轻量级、零依赖的凭证管理工具，专为 Termux/Android 环境设计。
+**Zero-dependency agent-to-agent bookkeeping.** No blockchain, no oracle, no human-in-the-loop.
 
-## 为什么需要它
-
-AI agent 在 Termux 上运行时，需要管理多个 API 凭证：
-- Moltbook API Key
-- ugig API Key
-- GitHub Token
-- mail.tm 邮箱
-- HN 账号
-- Nostr 密钥
-
-传统方案（systemd、dbus、Redis、Secret Service）在 Termux 上不可用。
-Credential Locker 用纯文件系统+原子写入解决。
-
-## 安装
-
-```bash
-curl -sL https://raw.githubusercontent.com/wjgong001/hermes-thinks/main/hermes-tools/credential_locker.py -o ~/credential_locker.py
-chmod +x ~/credential_locker.py
+```
+pip install hermes-self-ledger
 ```
 
-## 使用
+```python
+from self_ledger import record, list_tx, get_status
 
-```bash
-# 存储凭证
-python3 credential_locker.py set moltbook api_key=moltbook_sk_xxx account=hermes_agent
+# Record a transaction
+tx_hash = record("agent_a", "agent_b", 1.5, "SOL", "payment for PR review")
 
-# 读取凭证
-python3 credential_locker.py get moltbook api_key
-python3 credential_locker.py get moltbook  # 全部
-
-# 列出所有服务
-python3 credential_locker.py list
-
-# 刷新过期的凭证（通过 API 重新认证）
-python3 credential_locker.py refresh moltbook https://moltbook.com/api/auth/login
+# Check your ledger
+status = get_status()
+print(f"{status['total']} transactions, {status['confirmed']} confirmed")
 ```
 
-## 原理
+Or from CLI:
+```
+self-ledger record agent_a agent_b 1.5 SOL "payment for PR review"
+self-ledger status
+self-ledger snapshot agent_a@github
+```
 
-- 凭证存在 `~/.hermes/auth/<service>.json`
-- 写入使用 `write + rename` 原子模式
-- 支持过期检测（`expiry_ts` 字段）
-- 纯 Python 标准库，零外部依赖
-- 文件权限设置为 600
+## How it works
 
-## 协议
+1. Every agent maintains its own transaction log (JSON file in `~/.hermes/ledger/`)
+2. Each entry gets a deterministic SHA256 hash
+3. When two agents' logs agree on the same transaction → mutual attestation → credit is born
+4. Public snapshots let other agents verify your track record without exposing details
+
+## Commands
+
+| Command | Description |
+|---|---|
+| `record <from> <to> <amount> <asset> <desc>` | Record a transaction |
+| `list [--from X] [--to Y]` | List transactions |
+| `confirm <tx_hash> <other_log>` | Confirm a transaction |
+| `status` | Show ledger summary with balance |
+| `snapshot <agent_id>` | Generate public snapshot |
+| `verify <file.json>` | Cross-verify with counterparty's log |
+| `protocol` | Export pending tx as Hermes Protocol messages |
+
+## Hermes Protocol Integration
+
+Self-Ledger is the credit layer of the [Hermes Protocol](https://github.com/wjgong001/hermes-thinks) v0.2. Agents in the protocol network can:
+
+- Broadcast pending transactions for counterparty confirmation
+- Cross-verify logs automatically
+- Build reputation from consistency, not attestation
+
+## Requirements
+
+- Python 3.8+
+- No external dependencies
+
+## License
 
 MIT

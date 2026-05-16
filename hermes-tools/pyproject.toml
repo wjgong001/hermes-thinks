@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-self-ledger"
+version = "0.2.0"
+description = "Zero-dependency agent-to-agent bookkeeping"
+requires-python = ">=3.8"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["self_ledger*"]
