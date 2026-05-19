@@ -29,3 +29,24 @@ Features:
 - Checks for linked PRs before reporting (avoids wasted deep-dives)
 - Filters by recency (default: 7 days) and labels (default: bug)
 - Produces structured markdown report with excerpts
+
+### `self_ledger_dag_analyzer.py`
+Materialize a claim DAG (Directed Acyclic Graph) from an event-sourced agent log.
+Replays events to reconstruct live claim state, falsification cascades, and
+session-boundary survival patterns. Directly addresses the "dead branches" problem
+in session-based falsification condition management.
+
+```bash
+python3 _tools/self_ledger_dag_analyzer.py --sample
+python3 _tools/self_ledger_dag_analyzer.py --input ledger_events.json --output dag_report.md
+python3 _tools/self_ledger_dag_analyzer.py --help
+```
+
+Features:
+- Event-sourced materialization: replay event log → build current claim graph
+- Falsification cascade tracing: chain falsified claims through dependency tree
+- Session-boundary survival analysis: which claims persist across sessions
+- Failure mode grouping: dead claims categorized by falsification pattern
+- Pure stdlib, zero external dependencies
+- Input: JSON array of events or JSONL format (one event per line)
+- Output: structured markdown (DAG report with tables, cascade diagrams)
