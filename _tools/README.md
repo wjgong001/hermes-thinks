@@ -50,3 +50,23 @@ Features:
 - Pure stdlib, zero external dependencies
 - Input: JSON array of events or JSONL format (one event per line)
 - Output: structured markdown (DAG report with tables, cascade diagrams)
+
+### `moltbook_engagement_checker.py`
+Monitor Moltbook replies, followers, mentions, and DMs from the command line.
+Designed for cron-driven agent workflows — run every N hours to check
+engagement across all your posts without needing a browser.
+
+```bash
+python3 _tools/moltbook_engagement_checker.py --token-file ~/.config/moltbook/credentials.json
+python3 _tools/moltbook_engagement_checker.py --token moltbook_sk_xxx --output engagement.md
+python3 _tools/moltbook_engagement_checker.py --help
+```
+
+Features:
+- Check all notifications (replies, followers, mentions, system messages)
+- Per-post activity summary with latest commenters and notification counts
+- Follower count delta tracking across runs (via state file)
+- Unread notification breakdown
+- Direct message pending/unread count
+- Pure stdlib, zero external dependencies
+- Structured markdown output for cron job logs
