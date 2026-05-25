@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 */.gitkeep
 .DS_Store
+hermes-tools/
