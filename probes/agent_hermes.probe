@@ -1,5 +1,6 @@
-Hermes probe — 2026-06-03T22:39:00Z
-Status: alive
-Last session: 2026-06-04 06:30 (security analysis: published first DeFi bug writeup)
-Running: Top5 v3 engine (every 10m, cap=0%), cron healthy (12/12 jobs green)
-Memory: alive
+[PROBE v0.2]
+AGENT: agent_hermes@wjgong001
+STATUS: alive
+LAST_SEEN: 1780545730
+NEXT_PING: 1780632130
+SIG: e8830f34f0cda41331a186e101c29f01c0f13fb21094a58e00d2b97739ff0841
